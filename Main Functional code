@@ -1,0 +1,126 @@
+import time
+import json
+import RPi.GPIO as GPIO
+import paho.mqtt.client as mqtt
+import mysql.connector
+from mfrc522 import SimpleMFRC522
+from gpiozero import AngularServo
+import threading
+
+THINGSBOARD_HOST = 'thingsboard.cloud'
+password=""
+port=1883
+topic="v1/devices/me/telemetry"
+ACCESS_TOKEN = 'GHH6gjVzibnyaECkbpqd'
+
+IR_SENSOR_PIN_1 = 21
+IR_SENSOR_PIN_2 = 20
+IR_SENSOR_PIN_3 = 16
+
+SERVO_PIN = 18
+
+client = mqtt.Client()
+client.username_pw_set(ACCESS_TOKEN,password)
+client.connect(THINGSBOARD_HOST, port)
+print("MQTT connected")
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(IR_SENSOR_PIN_1, GPIO.IN)
+GPIO.setup(IR_SENSOR_PIN_2, GPIO.IN)
+GPIO.setup(IR_SENSOR_PIN_3, GPIO.IN)
+
+db = mysql.connector.connect(
+    host="localhost",
+    user="LENOVO",
+    passwd="us",
+    database="smart"
+)
+cursor = db.cursor()
+reader = SimpleMFRC522()
+
+min_pulse = 0.000544    # Library default = 1/1000
+max_pulse = 0.0024      # Library default = 2/1000
+min_angle = -90
+max_angle = 90
+step_angle = 5
+
+# Configure the servo for Angular motion
+servo = AngularServo(SERVO_PIN, 0, min_angle, max_angle, min_pulse, max_pulse, 20/1000, None)
+
+def ir_sensor_thread():
+    while True:
+        try:
+ir_sensor_1_value = bool(GPIO.input(IR_SENSOR_PIN_1))
+ir_sensor_2_value = bool(GPIO.input(IR_SENSOR_PIN_2))
+ir_sensor_3_value = bool(GPIO.input(IR_SENSOR_PIN_3))
+
+sensor_data = {'ir_sensor_1': ir_sensor_1_value,
+'ir_sensor_2': ir_sensor_2_value,
+'ir_sensor_3': ir_sensor_3_value}
+
+client.publish(topic, json.dumps(sensor_data), 0)
+
+time.sleep(2)  # Adjust the interval as needed
+
+except KeyboardInterrupt:
+print("Exiting IR Sensor thread...")
+break
+
+def rfid_thread():
+while True:
+try:
+print('Place Card for entry: ')
+id, text = reader.read()
+
+cursor.execute("SELECT id, name FROM customer WHERE rfid_uid="+str(id))
+result = cursor.fetchone()
+
+if cursor.rowcount >= 1:
+print("Welcome " + result[1])
+
+# Check if there is a previous entry with clock_out as NULL for the same user
+cursor.execute("SELECT id FROM stats WHERE user_id = %s AND clock_out IS NULL", (result[0],))
+previous_entry = cursor.fetchone()
+
+if previous_entry:
+previous_entry_id = previous_entry[0]
+# Update the previous entry's clock_out
+cursor.execute("UPDATE stats SET clock_out = CURRENT_TIMESTAMP WHERE id = %s", (previous_entry_id,))
+db.commit()
+print("Updated previous entry's clock_out")
+else:
+# Insert a new entr
+cursor.execute("INSERT INTO stats (user_id, name) VALUES (%s, %s)", (result[0], result[1]))
+db.commit()
+print("Inserted new entry")
+
+print("opening gate")
+for pos in range(min_angle, 0, step_angle):
+servo.angle = pos
+print(servo.angle)
+time.sleep(0.03)
+time.sleep(5)
+print("closing gate")
+for pos in range(0, min_angle, -1*step_angle):
+servo.angle = pos
+print(servo.angle)
+time.sleep(0.03)
+
+else:
+print("User does not exist.")
+time.sleep(2)
+except KeyboardInterrupt:
+print("Exiting RFID thread...")
+break
+
+ir_sensor_thread = threading.Thread(target=ir_sensor_thread)
+rfid_thread = threading.Thread(target=rfid_thread)
+
+try:
+ir_sensor_thread.start()
+rfid_thread.start()
+ir_sensor_thread.join()
+rfid_thread.join()
+except KeyboardInterrupt:
+GPIO.cleanup()
+print("Exiting...")
